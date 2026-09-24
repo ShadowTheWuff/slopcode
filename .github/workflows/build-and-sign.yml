@@ -27,7 +27,7 @@ env:
 
 jobs:
   build:
-    runs-on: blacksmith-2vcpu-windows      # was: windows-latest
+    runs-on: blacksmith-2vcpu-windows      # was: blacksmith-4vcpu-windows-2025
     outputs:
       is_release: ${{ env.IS_RELEASE }}
     env:
@@ -143,7 +143,7 @@ jobs:
   release:
     if: needs.build.result == 'success' && fromJSON(needs.build.outputs.is_release)
     needs: build
-    runs-on: blacksmith-2vcpu-ubuntu-2404  # was: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404  # was: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
     steps:
