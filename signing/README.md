@@ -35,8 +35,19 @@ Authorities** and **Trusted Publishers**.
 
 `.github/workflows/build-and-sign.yml` builds `vrchat_prefix.exe` and `renamer.exe`
 on Windows, signs them, checks the signatures, and uploads them as the
-**apps-signed** artifact on the workflow run. Pushing a tag like `v1.0.0` also
-publishes them as a GitHub Release. Pull-request builds are left unsigned.
+**apps-signed** artifact on the workflow run. Pull-request builds are left unsigned.
+
+### Releases
+
+The signed builds are published as a GitHub Release (under **Releases** on the repo page) when:
+
+- **You push to the default branch.** The release is named automatically: `v1.0.<run number>`.
+- **You run it by hand.** Go to **Actions → Build and sign → Run workflow**, tick
+  "Publish a GitHub Release", and optionally type a version like `v1.2.0`.
+- **You push a tag.** For example, `git tag v2.0.0 && git push origin v2.0.0`.
+
+Each release contains `vrchat_prefix.exe`, `renamer.exe`, `TannerKnapp.cer` and
+`SHA256SUMS.txt`. Release builds skip the build cache so they start from scratch.
 
 ### One-time setup: add the signing key as secrets
 
