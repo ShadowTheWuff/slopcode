@@ -193,8 +193,12 @@ jobs:
       - run:
           name: Publish GitHub Release
           command: |
+            # CIRCLE_PROJECT_USERNAME/REPONAME are CircleCI's own project names,
+            # which can differ from GitHub's, so take owner/repo from the git URL.
+            repo=$(printf '%s' "$CIRCLE_REPOSITORY_URL" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##')
+            echo "Publishing to $repo"
             gh release create "$RELEASE_TAG" out/* \
-              --repo "$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME" \
+              --repo "$repo" \
               --target "$CIRCLE_SHA1" \
               --title "$RELEASE_TAG" \
               --generate-notes
