@@ -26,17 +26,22 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+          # Caches pip downloads, keyed on the pinned build requirements.
+          # Tag (release) builds skip the cache so they start from a clean slate.
+          cache: ${{ !startsWith(github.ref, 'refs/tags/') && 'pip' || '' }}
+          cache-dependency-path: vrchat_prefix/requirements-build.txt
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: renamer/go.mod
-          cache: false
+          # Caches Go's build and module caches, keyed on go.mod.
+          cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          cache-dependency-path: renamer/go.mod
 
       - name: Build vrchat_prefix.exe
         working-directory: vrchat_prefix
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller
+          python -m pip install -r requirements-build.txt
           pyinstaller --onefile --noconfirm vrchat_prefix.py
 
       - name: Build renamer.exe
