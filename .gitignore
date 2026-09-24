@@ -1,0 +1,3 @@
+# Never commit private signing keys
+*.pfx
+*.p12
