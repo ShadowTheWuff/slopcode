@@ -1,5 +1,5 @@
 // renamer: rename every file inside a directory to a single base name.
-//
+// shadow was here ;3
 // Because two files can't share a name, files are numbered:
 //   photo.jpg, notes.txt, song.mp3  ->  vacation_1.jpg, vacation_2.txt, vacation_3.mp3
 // File extensions are kept. Sub-folders are left alone.
