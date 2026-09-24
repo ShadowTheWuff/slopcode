@@ -120,7 +120,10 @@ jobs:
       - run:
           name: Remove signing key
           when: always
-          command: Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:TEMP "signing.pfx")
+          command: |
+            $pfx = Join-Path $env:TEMP "signing.pfx"
+            if (Test-Path $pfx) { Remove-Item -Force $pfx }
+            exit 0
       - run:
           name: Verify signatures
           command: |
