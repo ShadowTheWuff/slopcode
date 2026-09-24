@@ -1,0 +1,137 @@
+name: Build and sign
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege by default; the release job asks for more.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # Thumbprint of signing/TannerKnapp.cer. Signing aborts if the secret's
+      # certificate is anything else, and the signed files are checked against it.
+      EXPECTED_THUMBPRINT: E3BEFA37B081A0F7C798629E972C014BE10377A3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: renamer/go.mod
+          cache: false
+
+      - name: Build vrchat_prefix.exe
+        working-directory: vrchat_prefix
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+          pyinstaller --onefile --noconfirm vrchat_prefix.py
+
+      - name: Build renamer.exe
+        working-directory: renamer
+        run: go build -trimpath -o dist/renamer.exe .
+
+      - name: Collect builds
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item vrchat_prefix/dist/vrchat_prefix.exe out/
+          Copy-Item renamer/dist/renamer.exe out/
+
+      # Secrets are never available to pull requests from forks, and we don't
+      # want PR code anywhere near the signing key, so PR builds stay unsigned.
+      - name: Sign
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.SIGNING_CERT_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:PFX_BASE64 -or -not $env:PFX_PASSWORD) {
+            throw "SIGNING_CERT_PFX_BASE64 / SIGNING_CERT_PASSWORD secrets are not set."
+          }
+
+          # Key file lives only in the runner's temp dir and is deleted in the cleanup step.
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_BASE64))
+
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfx, $env:PFX_PASSWORD)
+          if ($cert.Thumbprint -ne $env:EXPECTED_THUMBPRINT) {
+            throw "Secret certificate thumbprint $($cert.Thumbprint) != expected $env:EXPECTED_THUMBPRINT"
+          }
+
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw "signtool.exe not found" }
+
+          foreach ($exe in Get-ChildItem out\*.exe) {
+            & $signtool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+              /f $pfx /p $env:PFX_PASSWORD $exe.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $($exe.Name)" }
+          }
+
+      - name: Remove signing key
+        if: always()
+        shell: pwsh
+        run: Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP "signing.pfx")
+
+      - name: Verify signatures
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Trust the public cert from the repo on this throwaway runner so
+          # Windows can fully validate the chain (status must be "Valid").
+          Import-Certificate -FilePath signing/TannerKnapp.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          foreach ($exe in Get-ChildItem out\*.exe) {
+            $sig = Get-AuthenticodeSignature $exe.FullName
+            "{0}: {1} ({2})" -f $exe.Name, $sig.Status, $sig.SignerCertificate.Thumbprint
+            if ($sig.Status -ne "Valid") { throw "$($exe.Name) signature status is $($sig.Status)" }
+            if ($sig.SignerCertificate.Thumbprint -ne $env:EXPECTED_THUMBPRINT) { throw "$($exe.Name) signed by wrong certificate" }
+            if (-not $sig.TimeStamperCertificate) { throw "$($exe.Name) has no timestamp" }
+          }
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem out\*.exe | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content out\SHA256SUMS.txt
+          Get-Content out\SHA256SUMS.txt
+          Copy-Item signing/TannerKnapp.cer out/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ github.event_name == 'pull_request' && 'apps-unsigned' || 'apps-signed' }}
+          path: out/
+          if-no-files-found: error
+
+  # Pushing a tag like v1.0.0 publishes the signed builds as a GitHub Release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: apps-signed
+          path: out
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

@@ -30,3 +30,29 @@ Confirm the Windows security prompt after checking that the thumbprint matches t
 
 Open `certmgr.msc` and delete "Tanner Knapp" from **Trusted Root Certification
 Authorities** and **Trusted Publishers**.
+
+## Automatic builds (GitHub Actions)
+
+`.github/workflows/build-and-sign.yml` builds `vrchat_prefix.exe` and `renamer.exe`
+on Windows, signs them, checks the signatures, and uploads them as the
+**apps-signed** artifact on the workflow run. Pushing a tag like `v1.0.0` also
+publishes them as a GitHub Release. Pull-request builds are left unsigned.
+
+### One-time setup: add the signing key as secrets
+
+1. On your PC, copy the `.pfx` to the clipboard as base64:
+
+       $docs = [Environment]::GetFolderPath("MyDocuments")
+       [Convert]::ToBase64String([IO.File]::ReadAllBytes("$docs\mycert.pfx")) | Set-Clipboard
+
+2. On GitHub: repo **Settings → Secrets and variables → Actions → New repository secret**
+   - `SIGNING_CERT_PFX_BASE64`: paste the clipboard
+   - `SIGNING_CERT_PASSWORD`: the `.pfx` password
+
+3. Clear your clipboard afterwards (copy something else).
+
+How the workflow protects the key:
+- The key only exists in the runner's temp folder while signing and is deleted right after.
+- GitHub hides secret values in logs, and never gives them to pull requests from forks.
+- The workflow refuses to sign unless the key's thumbprint matches `TannerKnapp.cer`.
+- Third-party actions are pinned to exact commits, so a changed tag can't swap in new code.
