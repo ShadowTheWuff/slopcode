@@ -31,39 +31,53 @@ Confirm the Windows security prompt after checking that the thumbprint matches t
 Open `certmgr.msc` and delete "Tanner Knapp" from **Trusted Root Certification
 Authorities** and **Trusted Publishers**.
 
-## Automatic builds (GitHub Actions)
+## Automatic builds (CircleCI)
 
-`.github/workflows/build-and-sign.yml` builds `vrchat_prefix.exe` and `renamer.exe`
-on Windows, signs them, checks the signatures, and uploads them as the
-**apps-signed** artifact on the workflow run. Pull-request builds are left unsigned.
+`.circleci/config.yml` runs three jobs:
 
-### Releases
+1. **build** (Windows): builds `vrchat_prefix.exe` and `renamer.exe`. Runs for every branch and `v*` tag.
+2. **sign** (Windows): signs both, checks the signatures, and saves them as build
+   artifacts (`apps-signed`). Runs only for `main`, `claude/*` branches and `v*` tags.
+3. **deploy** (Linux): publishes a GitHub Release, tracked as a CircleCI deploy
+   (environment `github-releases`, component `vrchat-tools`). Runs for pushes to
+   the default branch and `v*` tags.
 
-The signed builds are published as a GitHub Release (under **Releases** on the repo page) when:
-
-- **You push to the default branch.** The release is named automatically: `v1.0.<run number>`.
-- **You run it by hand.** Go to **Actions → Build and sign → Run workflow**, tick
-  "Publish a GitHub Release", and optionally type a version like `v1.2.0`.
-- **You push a tag.** For example, `git tag v2.0.0 && git push origin v2.0.0`.
+Release names:
+- Pushes to the default branch: `v1.0.<pipeline number>`
+- A pushed tag such as `v2.0.0`: the tag name
+- A manual run (**Trigger Pipeline** in CircleCI): add a string parameter `version`, e.g. `v1.2.0`
 
 Each release contains `vrchat_prefix.exe`, `renamer.exe`, `TannerKnapp.cer` and
-`SHA256SUMS.txt`. Release builds skip the build cache so they start from scratch.
+`SHA256SUMS.txt`. Tag builds skip the build cache so they start from scratch.
 
-### One-time setup: add the signing key as secrets
+### One-time setup
 
-1. On your PC, copy the `.pfx` to the clipboard as base64:
+1. **Connect the repo.** Sign in at circleci.com with GitHub and set up the
+   `slopcode` project using the existing `.circleci/config.yml`.
 
-       $docs = [Environment]::GetFolderPath("MyDocuments")
-       [Convert]::ToBase64String([IO.File]::ReadAllBytes("$docs\mycert.pfx")) | Set-Clipboard
+2. **Create the `code-signing` context** (Organization Settings → Contexts) with:
+   - `SIGNING_CERT_PFX_BASE64`: your `.pfx` as base64. On your PC:
 
-2. On GitHub: repo **Settings → Secrets and variables → Actions → New repository secret**
-   - `SIGNING_CERT_PFX_BASE64`: paste the clipboard
+         $docs = [Environment]::GetFolderPath("MyDocuments")
+         [Convert]::ToBase64String([IO.File]::ReadAllBytes("$docs\mycert.pfx")) | Set-Clipboard
+
    - `SIGNING_CERT_PASSWORD`: the `.pfx` password
 
-3. Clear your clipboard afterwards (copy something else).
+3. **Create the `github-release` context** with `GH_TOKEN`: a GitHub
+   [fine-grained token](https://github.com/settings/personal-access-tokens/new)
+   limited to this repo, with **Contents: Read and write**.
 
-How the workflow protects the key:
-- The key only exists in the runner's temp folder while signing and is deleted right after.
-- GitHub hides secret values in logs, and never gives them to pull requests from forks.
-- The workflow refuses to sign unless the key's thumbprint matches `TannerKnapp.cer`.
-- Third-party actions are pinned to exact commits, so a changed tag can't swap in new code.
+4. **Create the deploy environment.** In CircleCI go to **Deploys → Environments**,
+   create an environment integration named `github-releases`. The component
+   `vrchat-tools` shows up after the first deploy.
+
+5. **Remove the old GitHub Actions secrets** (`SIGNING_CERT_PFX_BASE64`,
+   `SIGNING_CERT_PASSWORD`) from GitHub. The workflow that used them is gone.
+
+How the key is protected:
+- Only the **sign** job gets the `code-signing` context, and only for this repo's
+  own branches and tags. CircleCI never gives contexts to builds from forks.
+- The key only exists in the VM's temp folder while signing and is deleted right after.
+- The job refuses to sign unless the key's thumbprint matches `TannerKnapp.cer`.
+- Optionally, restrict both contexts to yourself with a security group or
+  project restriction in the context settings.

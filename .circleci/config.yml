@@ -1,0 +1,232 @@
+version: 2.1
+
+# Builds vrchat_prefix.exe and renamer.exe on Windows, signs them, and
+# publishes them as a GitHub Release, tracked as a CircleCI deploy.
+# Setup steps are in signing/README.md.
+
+parameters:
+  version:
+    description: Release version for a manually triggered pipeline, e.g. v1.2.0 (blank = automatic)
+    type: string
+    default: ""
+
+executors:
+  windows:
+    machine:
+      image: windows-server-2022-gui:current
+      shell: powershell.exe -ExecutionPolicy Bypass
+    resource_class: windows.medium
+  linux:
+    docker:
+      - image: cimg/base:current
+    resource_class: small
+
+jobs:
+  build:
+    executor: windows
+    environment:
+      PIP_CACHE_DIR: C:\ci-cache\pip
+      GOCACHE: C:\ci-cache\go-build
+    steps:
+      - checkout
+      # Release (tag) builds skip the cache so they start from a clean slate.
+      - unless:
+          condition: << pipeline.git.tag >>
+          steps:
+            - restore_cache:
+                keys:
+                  - pip-v1-{{ checksum "vrchat_prefix/requirements-build.txt" }}
+            - restore_cache:
+                keys:
+                  - go-v1-{{ checksum "renamer/go.mod" }}
+      - run:
+          name: Tool versions
+          command: |
+            python --version
+            go version
+      - run:
+          name: Build vrchat_prefix.exe
+          working_directory: vrchat_prefix
+          command: |
+            $ErrorActionPreference = "Stop"
+            python -m pip install -r requirements-build.txt
+            if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+            python -m PyInstaller --onefile --noconfirm vrchat_prefix.py
+            if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
+      - run:
+          name: Build renamer.exe
+          working_directory: renamer
+          command: |
+            go build -trimpath -o dist/renamer.exe .
+            if ($LASTEXITCODE -ne 0) { throw "go build failed" }
+      - unless:
+          condition: << pipeline.git.tag >>
+          steps:
+            - save_cache:
+                key: pip-v1-{{ checksum "vrchat_prefix/requirements-build.txt" }}
+                paths: [C:\ci-cache\pip]
+            - save_cache:
+                key: go-v1-{{ checksum "renamer/go.mod" }}
+                paths: [C:\ci-cache\go-build]
+      - run:
+          name: Collect builds
+          command: |
+            New-Item -ItemType Directory -Force out | Out-Null
+            Copy-Item vrchat_prefix/dist/vrchat_prefix.exe out/
+            Copy-Item renamer/dist/renamer.exe out/
+      - store_artifacts:
+          path: out
+          destination: apps-unsigned
+      - persist_to_workspace:
+          root: .
+          paths: [out]
+
+  sign:
+    executor: windows
+    environment:
+      # Thumbprint of signing/TannerKnapp.cer. Signing aborts if the key in the
+      # context is anything else, and the signed files are checked against it.
+      EXPECTED_THUMBPRINT: E3BEFA37B081A0F7C798629E972C014BE10377A3
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          name: Sign
+          command: |
+            $ErrorActionPreference = "Stop"
+            if (-not $env:SIGNING_CERT_PFX_BASE64 -or -not $env:SIGNING_CERT_PASSWORD) {
+              throw "SIGNING_CERT_PFX_BASE64 / SIGNING_CERT_PASSWORD are not set (code-signing context)."
+            }
+
+            # Key file lives only in the temp dir and is deleted in the next step.
+            $pfx = Join-Path $env:TEMP "signing.pfx"
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT_PFX_BASE64))
+
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfx, $env:SIGNING_CERT_PASSWORD)
+            if ($cert.Thumbprint -ne $env:EXPECTED_THUMBPRINT) {
+              throw "Context certificate thumbprint $($cert.Thumbprint) != expected $env:EXPECTED_THUMBPRINT"
+            }
+
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+              Sort-Object FullName | Select-Object -Last 1
+            if (-not $signtool) { throw "signtool.exe not found" }
+
+            foreach ($exe in Get-ChildItem out\*.exe) {
+              & $signtool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+                /f $pfx /p $env:SIGNING_CERT_PASSWORD $exe.FullName
+              if ($LASTEXITCODE -ne 0) { throw "signtool failed on $($exe.Name)" }
+            }
+      - run:
+          name: Remove signing key
+          when: always
+          command: Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:TEMP "signing.pfx")
+      - run:
+          name: Verify signatures
+          command: |
+            $ErrorActionPreference = "Stop"
+            # Trust the public cert from the repo on this throwaway VM so
+            # Windows can fully validate the chain (status must be "Valid").
+            Import-Certificate -FilePath signing/TannerKnapp.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+            foreach ($exe in Get-ChildItem out\*.exe) {
+              $sig = Get-AuthenticodeSignature $exe.FullName
+              "{0}: {1} ({2})" -f $exe.Name, $sig.Status, $sig.SignerCertificate.Thumbprint
+              if ($sig.Status -ne "Valid") { throw "$($exe.Name) signature status is $($sig.Status)" }
+              if ($sig.SignerCertificate.Thumbprint -ne $env:EXPECTED_THUMBPRINT) { throw "$($exe.Name) signed by wrong certificate" }
+              if (-not $sig.TimeStamperCertificate) { throw "$($exe.Name) has no timestamp" }
+            }
+      - run:
+          name: Checksums
+          command: |
+            Get-ChildItem out\*.exe | ForEach-Object {
+              "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+            } | Set-Content out\SHA256SUMS.txt
+            Get-Content out\SHA256SUMS.txt
+            Copy-Item signing/TannerKnapp.cer out/
+      - store_artifacts:
+          path: out
+          destination: apps-signed
+      - persist_to_workspace:
+          root: .
+          paths: [out]
+
+  deploy:
+    executor: linux
+    environment:
+      GH_VERSION: 2.101.0
+      INPUT_VERSION: << pipeline.parameters.version >>
+    steps:
+      - attach_workspace:
+          at: .
+      - run:
+          name: Pick version
+          command: |
+            if [ -n "${CIRCLE_TAG:-}" ]; then
+              v="$CIRCLE_TAG"
+            elif [ -n "${INPUT_VERSION:-}" ]; then
+              v="$INPUT_VERSION"
+            else
+              v="v1.0.<< pipeline.number >>"
+            fi
+            if ! printf '%s' "$v" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "Version '$v' must look like v1.2.3"; exit 1
+            fi
+            echo "export RELEASE_TAG='$v'" >> "$BASH_ENV"
+            echo "Releasing $v"
+      - run:
+          name: Plan a deploy
+          command: |
+            circleci run release plan \
+              --environment-name="github-releases" \
+              --component-name="vrchat-tools" \
+              --target-version="$RELEASE_TAG"
+      - run:
+          name: Install GitHub CLI
+          command: |
+            curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+            tar -xzf /tmp/gh.tgz -C /tmp
+            sudo install "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
+            gh --version
+      - run:
+          name: Publish GitHub Release
+          command: |
+            gh release create "$RELEASE_TAG" out/* \
+              --repo "$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME" \
+              --target "$CIRCLE_SHA1" \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+      - run:
+          name: Update a deploy to SUCCESS
+          command: circleci run release update --status=SUCCESS
+          when: on_success
+      - run:
+          name: Update planned deploy to FAILED
+          command: circleci run release update --status=FAILED
+          when: on_fail
+
+workflows:
+  build-sign-release:
+    jobs:
+      - build:
+          filters:
+            tags:
+              only: /^v.*/
+      - sign:
+          requires: [build]
+          context: code-signing
+          # Only our own branches and v* tags are signed. Forked pull requests
+          # never match, and CircleCI never gives contexts to forked PR builds.
+          filters:
+            branches:
+              only: [main, /claude\/.*/]
+            tags:
+              only: /^v.*/
+      - deploy:
+          requires: [sign]
+          context: github-release
+          # Releases: every push to the default branch, and v* tags.
+          filters:
+            branches:
+              only: [main, claude/batch-file-rename-app-u1gxdp]
+            tags:
+              only: /^v.*/
