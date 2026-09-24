@@ -158,6 +158,7 @@ jobs:
     environment:
       GH_VERSION: 2.101.0
       INPUT_VERSION: << pipeline.parameters.version >>
+      GH_TOKEN: $GITHUB_TOKEN
     steps:
       - attach_workspace:
           at: .
