@@ -43,7 +43,7 @@ Authorities** and **Trusted Publishers**.
    the default branch and `v*` tags.
 
 Release names:
-- Pushes to the default branch: `v1.0.<pipeline number>`
+- Pushes to the default branch: `v1.1.<pipeline number>`
 - A pushed tag such as `v2.0.0`: the tag name
 - A manual run (**Trigger Pipeline** in CircleCI): add a string parameter `version`, e.g. `v1.2.0`
 

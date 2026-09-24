@@ -157,6 +157,11 @@ jobs:
     executor: linux
     environment:
       GH_VERSION: 2.101.0
+      # GitHub repo that releases are published to. CircleCI's project names
+      # ("tanner knapp/prod") don't match GitHub's, and CIRCLE_REPOSITORY_URL
+      # is empty in this job, so the repo is named here. Update it if the repo
+      # is renamed or moved.
+      GITHUB_REPO: Shadowdewuff/slopcode
       INPUT_VERSION: << pipeline.parameters.version >>
     steps:
       - attach_workspace:
@@ -169,7 +174,9 @@ jobs:
             elif [ -n "${INPUT_VERSION:-}" ]; then
               v="$INPUT_VERSION"
             else
-              v="v1.0.<< pipeline.number >>"
+              # v1.1.x so automatic CircleCI releases never clash with the
+              # v1.0.x releases made by the old GitHub Actions workflow.
+              v="v1.1.<< pipeline.number >>"
             fi
             if ! printf '%s' "$v" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
               echo "Version '$v' must look like v1.2.3"; exit 1
@@ -193,13 +200,17 @@ jobs:
       - run:
           name: Publish GitHub Release
           command: |
-            # CIRCLE_PROJECT_USERNAME/REPONAME are CircleCI's own project names,
-            # which can differ from GitHub's, so take owner/repo from the git URL.
-            repo=$(printf '%s' "$CIRCLE_REPOSITORY_URL" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##')
+            repo="${GITHUB_REPO:-}"
+            if [ -z "$repo" ] && [ -n "${CIRCLE_REPOSITORY_URL:-}" ]; then
+              repo=$(printf '%s' "$CIRCLE_REPOSITORY_URL" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##')
+            fi
+            if [ -z "$repo" ]; then
+              echo "Don't know which GitHub repo to publish to; set GITHUB_REPO."; exit 1
+            fi
             echo "Publishing to $repo"
             gh release create "$RELEASE_TAG" out/* \
               --repo "$repo" \
-              --target "$CIRCLE_SHA1" \
+              --target "<< pipeline.git.revision >>" \
               --title "$RELEASE_TAG" \
               --generate-notes
       - run:
